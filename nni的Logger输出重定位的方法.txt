@@ -1,0 +1,22 @@
+import logging
+from nni.utils import Logger
+
+# 设置文件日志记录器
+logging.basicConfig(filename='params.log', level=logging.DEBUG)
+
+# 创建NNI的日志记录器
+nni_logger = Logger()
+
+# 将NNI的日志输出重定向到文件日志记录器
+nni_logger.addHandler(logging.StreamHandler())
+
+
+
+
+
+# 如何使用NNI的日志记录器记录日志
+nni_logger.debug("This is a debug message.")
+nni_logger.info("This is an info message.")
+nni_logger.warning("This is a warning message.")
+nni_logger.error("This is an error message.")
+nni_logger.critical("This is a critical message.")
