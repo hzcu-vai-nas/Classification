@@ -1,0 +1,2 @@
+result/training_validation_loss_OmlV6.png
+result/validation_accuracy_OmlV6.png
