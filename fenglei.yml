@@ -1,0 +1,22 @@
+experimentName: Fenglei
+
+trialGpuNumber: 0
+trialConcurrency: 1
+
+maxExperimentDuration: 24h
+maxTrialNumber: 10
+
+searchSpaceFile: search_space.json
+
+trialCommand: python3 NAS_SL_JPG2.py # NOTE: change "python3" to "python" if you are using Windows
+
+tuner:
+  name: TPE
+  classArgs:
+    optimize_mode: maximize
+   
+trainingService:
+  platform: local
+  useActiveGpu: false
+
+
