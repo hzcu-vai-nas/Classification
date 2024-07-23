@@ -32,6 +32,10 @@ from nni.nas.experiment import NasExperiment
 from nni.nas.nn.pytorch import LayerChoice, ModelSpace, MutableDropout, MutableLinear
 
 
+# 模拟三个检查点,初始化的状态
+checkpoint_number = 1
+status = "grey"
+
 app = Flask(__name__)
 
 lock = threading.Lock()
@@ -42,6 +46,12 @@ model_dict = {}
 def index():
     return render_template('index.html')
     
+@app.route('/update_status')
+def update_status():
+    global checkpoint_number
+    global status
+    return jsonify({'checkpoint': checkpoint_number,'status': status})
+
 
 # 在一个新线程中运行 Flask 应用程序的函数
 def run_flask_app():
@@ -102,7 +112,7 @@ def preprocess_image(image_path):
 
 
 # 创建数据集和数据加载器
-class CustomDataset(torch.utils.data.Dataset):
+class CustomDataset_csv(torch.utils.data.Dataset):
     def __init__(self, data_dir, csv_file, transform=None, image_ext=".jpg"):
         self.data_dir = data_dir
         self.transform = transform
@@ -116,6 +126,43 @@ class CustomDataset(torch.utils.data.Dataset):
         img_name = os.path.join(self.data_dir, f"{self.df.iloc[idx, 0]}{self.image_ext}")  # 在文件名后添加后缀
         image = preprocess_image(img_name)
         label = self.df.iloc[idx, 1]  # 获取对应的类别标签，如果是全有肿瘤的数据集，直接设置为1即可
+        return image, label
+
+
+class CustomDataset_no_csv(torch.utils.data.Dataset):
+    def __init__(self, data_dir, transform=None, image_ext=".jpg"):
+        self.data_dir = data_dir
+        self.transform = transform
+        self.image_ext = image_ext
+
+        self.image_paths = []
+        self.labels = []
+
+        # Iterate through all subdirectories
+        for label, folder_name in enumerate(os.listdir(data_dir)):
+            folder_path = os.path.join(data_dir, folder_name)
+            if os.path.isdir(folder_path):
+                # Exclude the "notomor" folder for tumor images
+                if folder_name != "notumor":
+                    for img_name in os.listdir(folder_path):
+                        if img_name.endswith(image_ext):
+                            img_path = os.path.join(folder_path, img_name)
+                            self.image_paths.append(img_path)
+                            self.labels.append(1)  # Label 1 for tumor
+                else:
+                    for img_name in os.listdir(folder_path):
+                        if img_name.endswith(image_ext):
+                            img_path = os.path.join(folder_path, img_name)
+                            self.image_paths.append(img_path)
+                            self.labels.append(0)  # Label 0 for no tumor
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        image = preprocess_image(img_path)
+        label = self.labels[idx]
         return image, label
 
 
@@ -211,12 +258,17 @@ def run_classification_task(model_path, data_dir):
     # df = pd.read_csv(csv_file)
     # labels = df["Class"].tolist()  # Assuming the column name for labels is "label"
     
-    
+    transf = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
     # Prepare new dataset
     # Assuming you have a function to load your new dataset, e.g., load_new_dataset()
-    transf = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-    new_dataset = CustomDataset(data_dir / "Brain Tumor", data_dir / "Brain Tumor.csv", transform=transf, image_ext=".jpg")
-    dataloader = torch.utils.data.DataLoader(new_dataset, batch_size=1, shuffle=True)
+    if os.path.exists(os.path.join(data_dir, "Brain Tumor.csv")):
+        dataset = CustomDataset_csv(data_dir / "Brain Tumor", data_dir / "Brain Tumor.csv", transform=transf, image_ext=".jpg")
+    else:
+        # Use CustomDataset_no_csv if CSV file does not exist
+        dataset = CustomDataset_no_csv(data_dir / "Training", transform=transf, image_ext=".jpg")
+
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=True)
+
 
     # result_logger.info(f"labels: {labels}\n\n\n\n")
     
@@ -243,7 +295,8 @@ def run_classification_task(model_path, data_dir):
     
 
 def main():
-    
+    global checkpoint_number
+    global status
     # 运行寻找模型的最佳超参的nni工作
     evaluator = FunctionalEvaluator(evaluate_model)
     exp = NasExperiment(model_space, evaluator, search_strategy)
@@ -252,15 +305,41 @@ def main():
     exp.config.trial_concurrency = 1  # will run 1 trial concurrently
     exp.config.trial_gpu_number = 0   # will not use GPU
     exp.config.training_service.use_active_gpu = False
-    exp.run(port=8080)
+
+    with lock:
+        checkpoint_number = 1
+        status = "blue"
+
+    try:
+        exp.run(port=8080)
+    except Exception as e:
+        with lock:
+            checkpoint_number = 1
+            status = "red"  
     
-    for model_dict in exp.export_top_models(formatter='dict'):
-        result_logger.info(f"Best model parameters: {model_dict}") 
-    with nni.nas.space.model_context(model_dict):
-        final_model = MyModelSpace()
-        torch.save(final_model , os.path.join("./weights", "trained_model.pt"))
-        
+    with lock:
+        checkpoint_number = 1
+        status = "green"
+
+    with lock:
+        checkpoint_number = 2
+        status = "blue"
     
+    try:
+        for model_dict in exp.export_top_models(formatter='dict'):
+            result_logger.info(f"Best model parameters: {model_dict}") 
+        with nni.nas.space.model_context(model_dict):
+            final_model = MyModelSpace()
+            torch.save(final_model , os.path.join("./weights", "trained_model.pt"))
+    except Exception as e:
+        with lock:
+            checkpoint_number = 2
+            status = "red"
+
+    with lock:
+        checkpoint_number = 2
+        status = "green"
+
     search_space = {
         "conv2": {"_type":"choice", "_value": [model_dict["conv2"]]},
         "dropout":{"_type":"choice", "_value": [model_dict["dropout"]]}, 
@@ -281,8 +360,21 @@ def main():
     classify_experiment.config.max_trial_number = 10
     classify_experiment.config.trial_concurrency = 1
 
-    classify_experiment.run(8090)
+
+    with lock:
+        checkpoint_number = 3
+        status = "blue"
+
+    try:
+        classify_experiment.run(8090)
+    except Exception as e:
+        with lock:
+            checkpoint_number = 3
+            status = "red"
     
+    with lock:
+        checkpoint_number = 3
+        status = "green"
     
     # 获取所有试验的指标信息
     all_trials_metrics = classify_experiment.get_job_metrics()
@@ -326,16 +418,42 @@ def main():
     print("Best hyperparameters:", hyper_params_dict)
     
     # 对导入了最佳参数的最佳模型进行训练
-    
-    train_final_model(final_model,hyper_params_dict)
+    with lock:
+        checkpoint_number = 4
+        status = "blue"
+
+    try:
+        train_final_model(final_model,hyper_params_dict)
+    except Exception as e:
+        with lock:
+            checkpoint_number = 4
+            status = "red"
+
+    with lock:
+        checkpoint_number = 4
+        status = "green"
     
     torch.save(final_model , os.path.join("./weights", "trained_model.pt"))
     
     # 对训练效果进行测试，并且输出
     
+    with lock:
+        checkpoint_number = 5
+        status = "blue"
+
     mismatches = []
     model_path = "./weights/trained_model.pt"
-    mismatches = run_classification_task(model_path, data_dir)
+
+    try:
+        mismatches = run_classification_task(model_path, data_dir)
+    except Exception as e:
+        with lock:
+            checkpoint_number = 5
+            status = "red"
+    
+    with lock:
+        checkpoint_number = 5
+        status = "green"
     
     result_logger.info(mismatches)
     
@@ -349,9 +467,13 @@ def train_final_model(model,params):
     
     optimizer = torch.optim.SGD(model.parameters(), lr=params['lr'],  weight_decay=1e-3)
     transf = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-    training_dataset = CustomDataset(data_dir / "Brain Tumor", data_dir / "Brain Tumor.csv", transform=transf, image_ext=".jpg")
-    validation_dataset = CustomDataset(data_dir / "Brain Tumor", data_dir / "Brain Tumor.csv", transform=transf, image_ext=".jpg")
-    
+    if os.path.exists(os.path.join(data_dir, "Brain Tumor.csv")):
+        training_dataset = CustomDataset_csv(data_dir / "Brain Tumor", data_dir / "Brain Tumor.csv", transform=transf, image_ext=".jpg")
+        validation_dataset = CustomDataset_csv(data_dir / "Brain Tumor", data_dir / "Brain Tumor.csv", transform=transf, image_ext=".jpg")
+    else:
+        training_dataset = CustomDataset_no_csv(data_dir / "Training", transform=transf, image_ext=".jpg")
+        validation_dataset = CustomDataset_no_csv(data_dir / "Testing", transform=transf, image_ext=".jpg")
+
     train_loader = torch.utils.data.DataLoader(training_dataset, batch_size=params['batch_size'], shuffle=True)
     test_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=params['batch_size'], shuffle=True)
 
@@ -370,8 +492,12 @@ def evaluate_model(model):
     
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-3,  weight_decay=1e-3)
     transf = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-    training_dataset = CustomDataset(data_dir / "Brain Tumor", data_dir / "Brain Tumor.csv", transform=transf, image_ext=".jpg")
-    validation_dataset = CustomDataset(data_dir / "Brain Tumor", data_dir / "Brain Tumor.csv", transform=transf, image_ext=".jpg")
+    if os.path.exists(os.path.join(data_dir, "Brain Tumor.csv")):
+        training_dataset = CustomDataset_csv(data_dir / "Brain Tumor", data_dir / "Brain Tumor.csv", transform=transf, image_ext=".jpg")
+        validation_dataset = CustomDataset_csv(data_dir / "Brain Tumor", data_dir / "Brain Tumor.csv", transform=transf, image_ext=".jpg")
+    else:
+        training_dataset = CustomDataset_no_csv(data_dir / "Training", transform=transf, image_ext=".jpg")
+        validation_dataset = CustomDataset_no_csv(data_dir / "Testing", transform=transf, image_ext=".jpg")
     
     train_loader = torch.utils.data.DataLoader(training_dataset, batch_size=8, shuffle=True)
     test_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=8, shuffle=True)
@@ -389,7 +515,6 @@ def evaluate_model(model):
     
 if __name__ == '__main__':
     try:   
-        global value_epoch
         
         flask_thread = threading.Thread(target=run_flask_app)
         flask_thread.start()
