@@ -21,7 +21,7 @@ import atexit
 from nni.trial import get_trial_id
 from nni.experiment import Experiment
 import json
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 import threading
 
 import pandas as pd
@@ -52,6 +52,14 @@ def update_status():
     global status
     return jsonify({'checkpoint': checkpoint_number,'status': status})
 
+
+@app.route('/terminate_flask', methods=['POST'])
+def terminate_flask():
+    func = request.environ.get('werkzeug.server.shutdown')
+    if func is None:
+        raise RuntimeError('Not running with the Werkzeug Server')
+    func()
+    return 'Flask 应用程序已关闭'
 
 # 在一个新线程中运行 Flask 应用程序的函数
 def run_flask_app():
@@ -101,6 +109,36 @@ data_dir = Path("./data")
 result_dir = Path("./result")
 result_dir.mkdir(parents=True, exist_ok=True)
 
+
+def plot_and_save_metrics(training_loss_history, validation_loss_history, validation_accuracy_history, result_dir, id):
+    # Plot and save training and validation loss
+    plt.plot(training_loss_history, label='Training Loss')
+    plt.plot(validation_loss_history, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss(%)')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.savefig(result_dir / f"training_validation_loss_{id}.png")  # Save plot to result_dir
+    plt.close()
+
+    # Append image path to image_urls.txt
+    image_urls_input = result_dir / f"training_validation_loss_{id}.png"
+    with open('image_urls.txt', 'a') as f:
+        f.write(str(image_urls_input)+"\n")
+
+    # Plot and save validation accuracy
+    plt.plot(validation_accuracy_history, label='Validation Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy(%)')
+    plt.title('Validation Accuracy')
+    plt.legend()
+    plt.savefig(result_dir / f"validation_accuracy_{id}.png")  # Save plot to result_dir
+    plt.close()
+
+    # Append image path to image_urls.txt
+    image_urls_input = result_dir / f"validation_accuracy_{id}.png"
+    with open('image_urls.txt', 'a') as f:
+        f.write(str(image_urls_input)+"\n")
 
 # 数据预处理函数，用于处理JPG文件
 def preprocess_image(image_path):
@@ -208,8 +246,14 @@ result_logger.info(model_space)
 
 search_strategy = strategy.Random()
 
+# 存储训练过程状态
+training_loss_history = []
+validation_loss_history = []
+validation_accuracy_history = []
+
 def train_epoch(model, device, train_loader, optimizer, epoch):
     loss_fn = torch.nn.CrossEntropyLoss()
+    epoch_training_loss = []  # 初始化损失列表
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
@@ -222,7 +266,12 @@ def train_epoch(model, device, train_loader, optimizer, epoch):
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader), loss.item()))
+            
+        epoch_training_loss.append(loss.item())  # 将每个batch的损失添加到当前epoch的损失列表中
 
+    # 计算当前epoch的平均训练损失并添加到训练损失历史列表中
+    epoch_avg_training_loss = np.mean(epoch_training_loss)
+    training_loss_history.append(epoch_avg_training_loss)
 
 def test_epoch(model, device, test_loader):
     model.eval()
@@ -239,8 +288,12 @@ def test_epoch(model, device, test_loader):
 
     print('\nTest set: Accuracy: {}/{} ({:.0f}%)\n'.format(
           correct, len(test_loader.dataset), accuracy))
+    
+    validation_loss_history.append(test_loss)
+    validation_accuracy = 100. * correct / len(test_loader.dataset)
+    validation_accuracy_history.append(validation_accuracy)
 
-    return accuracy
+    return validation_accuracy
 
 
 
@@ -297,6 +350,9 @@ def run_classification_task(model_path, data_dir):
 def main():
     global checkpoint_number
     global status
+
+
+    
     # 运行寻找模型的最佳超参的nni工作
     evaluator = FunctionalEvaluator(evaluate_model)
     exp = NasExperiment(model_space, evaluator, search_strategy)
@@ -478,10 +534,16 @@ def train_final_model(model,params):
     test_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=params['batch_size'], shuffle=True)
 
     for epoch in range(6):
+        # 获取试验ID,用来分别输出每次试验的绘制图像
+        exp_id = nni.get_experiment_id()
+        id = nni.get_trial_id()
+        
         # train the model for one epoch
         train_epoch(model, device, train_loader, optimizer, epoch)
         # test the model for one epoch
         accuracy = test_epoch(model, device, test_loader)
+
+        plot_and_save_metrics(training_loss_history, validation_loss_history, validation_accuracy_history, result_dir, id)
         
 
 def evaluate_model(model):
@@ -503,10 +565,17 @@ def evaluate_model(model):
     test_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=8, shuffle=True)
 
     for epoch in range(3):
+        # 获取试验ID,用来分别输出每次试验的绘制图像
+        exp_id = nni.get_experiment_id()
+        id = nni.get_trial_id()
+
         # train the model for one epoch
         train_epoch(model, device, train_loader, optimizer, epoch)
         # test the model for one epoch
         accuracy = test_epoch(model, device, test_loader)
+
+        plot_and_save_metrics(training_loss_history, validation_loss_history, validation_accuracy_history, result_dir, id)
+
         # call report intermediate result. Result can be float or dict
         nni.report_intermediate_result(accuracy)
 
